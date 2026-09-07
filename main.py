@@ -181,17 +181,39 @@ def debug(request: Request):
 
     out = [f"<p><b>Scope van token:</b> {token_info.get('scope')}</p>"]
 
-    me = _requests.get("https://api.spotify.com/v1/me", headers=headers)
-    out.append(f"<p><b>/me:</b> {me.status_code} — {me.text[:500]}</p>")
+    me_resp = _requests.get("https://api.spotify.com/v1/me", headers=headers)
+    me_json = me_resp.json() if me_resp.ok else {}
+    my_id = me_json.get("id")
+    out.append(f"<p><b>/me:</b> {me_resp.status_code} — ingelogd als '{me_json.get('display_name')}' (id: {my_id})</p>")
 
     settings = load_settings()
     for label, pid in [("kids", settings.get("kids_playlist")), ("adults", settings.get("adults_playlist"))]:
         if not pid:
+            out.append(f"<p><b>{label} playlist:</b> niet ingevuld.</p>")
             continue
-        meta = _requests.get(f"https://api.spotify.com/v1/playlists/{pid}", headers=headers)
-        out.append(f"<p><b>{label} playlist meta ({pid}):</b> {meta.status_code} — {meta.text[:800]}</p>")
+        meta = _requests.get(
+            f"https://api.spotify.com/v1/playlists/{pid}",
+            headers=headers,
+            params={"fields": "name,public,owner.id,owner.display_name"},
+        )
+        owner_id = None
+        owner_match_note = ""
+        if meta.ok:
+            meta_json = meta.json()
+            owner_id = (meta_json.get("owner") or {}).get("id")
+            if my_id and owner_id and owner_id != my_id:
+                owner_match_note = (
+                    " ⚠️ <b>Deze playlist is niet van jou</b> — eigenaar is "
+                    f"'{(meta_json.get('owner') or {}).get('display_name')}' (id: {owner_id}), "
+                    f"jij bent ingelogd als id {my_id}. Spotify's Development Mode blokkeert het "
+                    "ophalen van tracks uit playlists van andere accounts, zelfs als je editor bent. "
+                    "Dupliceer de playlist in de Spotify-app naar je eigen account en gebruik die link."
+                )
+            elif my_id and owner_id and owner_id == my_id:
+                owner_match_note = " ✅ Deze playlist is van jouw eigen account."
+        out.append(f"<p><b>{label} playlist meta ({pid}):</b> {meta.status_code} — {meta.text[:500]}{owner_match_note}</p>")
         tracks = _requests.get(f"https://api.spotify.com/v1/playlists/{pid}/tracks", headers=headers, params={"limit": 5})
-        out.append(f"<p><b>{label} playlist tracks:</b> {tracks.status_code} — {tracks.text[:800]}</p>")
+        out.append(f"<p><b>{label} playlist tracks:</b> {tracks.status_code} — {tracks.text[:500]}</p>")
 
     return HTMLResponse("<html><body style='font-family:sans-serif;max-width:800px;margin:40px auto;word-wrap:break-word;'>"
                          + "".join(out) + "<p><a href='/'>Terug</a></p></body></html>")
@@ -249,12 +271,12 @@ async def start_playback(request: Request):
 
     try:
         kids = fetch_playlist_track_uris(sp, settings["kids_playlist"])
-    except SpotifyException as e:
-        return HTMLResponse(f"<p>Kon de playlist voor kinderen niet ophalen: {e}. <a href='/'>Terug</a></p>")
+    except SpotifyException:
+        kids = []
     try:
         adults = fetch_playlist_track_uris(sp, settings["adults_playlist"])
-    except SpotifyException as e:
-        return HTMLResponse(f"<p>Kon de playlist voor volwassenen niet ophalen: {e}. <a href='/'>Terug</a></p>")
+    except SpotifyException:
+        adults = []
 
     if settings.get("shuffle", True):
         random.shuffle(kids)
@@ -266,6 +288,10 @@ async def start_playback(request: Request):
     if not mix:
         kids_info = fetch_playlist_info(sp, settings["kids_playlist"])
         adults_info = fetch_playlist_info(sp, settings["adults_playlist"])
+        try:
+            my_id = sp.current_user().get("id")
+        except SpotifyException:
+            my_id = None
 
         def describe(label: str, playlist_id: str, count: int, info: dict) -> str:
             if not playlist_id:
@@ -280,6 +306,14 @@ async def start_playback(request: Request):
                     "van hun eigen redactionele/algoritmische playlists ophalen. "
                     "Maak een kopie: open de playlist in Spotify, kies 'Dupliceren' "
                     "(of maak een eigen playlist en sleep de nummers erin), en gebruik die eigen playlist hier."
+                )
+            elif info.get("owner") and my_id and info.get("owner") != my_id:
+                owner_note = (
+                    f" ⚠️ Deze playlist is niet van jouw eigen account (eigenaar: "
+                    f"'{info.get('owner_name') or info.get('owner')}'). Spotify's Development Mode "
+                    "blokkeert het ophalen van tracks uit playlists van andere accounts, ook als je "
+                    "editor/collaborator bent. Dupliceer de playlist in de Spotify-app naar je eigen "
+                    "account ('···' → Dupliceren) en gebruik daarna de link van die eigen kopie."
                 )
             return f"<li>{label}: '{info.get('name') or playlist_id}' — {count} nummers gevonden.{owner_note}</li>"
 
