@@ -230,14 +230,17 @@ async def start_playback(request: Request):
     device_id = str(form.get("device_id") or "")
     settings = load_settings()
 
+    kids_error = adults_error = None
     try:
         kids = fetch_playlist_track_uris(sp, settings["kids_playlist"])
-    except SpotifyException:
+    except Exception as e:
         kids = []
+        kids_error = str(e)
     try:
         adults = fetch_playlist_track_uris(sp, settings["adults_playlist"])
-    except SpotifyException:
+    except Exception as e:
         adults = []
+        adults_error = str(e)
 
     if settings.get("shuffle", True):
         random.shuffle(kids)
@@ -245,6 +248,18 @@ async def start_playback(request: Request):
 
     mix = interleave(kids, adults, settings["kids_count"], settings["adults_count"])
     mix = mix[:500]  # veiligheidslimiet
+
+    if kids_error or adults_error:
+        details = ""
+        if kids_error:
+            details += f"<li>Kinderen: fout bij ophalen ({kids_error}).</li>"
+        if adults_error:
+            details += f"<li>Volwassenen: fout bij ophalen ({adults_error}).</li>"
+        return HTMLResponse(
+            f"<p>Er ging iets mis bij het ophalen van (een van) de playlists:</p><ul>{details}</ul>"
+            f"<p>Kinderen: {len(kids)} nummers gevonden, Volwassenen: {len(adults)} nummers gevonden.</p>"
+            "<p><a href='/'>Terug</a></p>"
+        )
 
     if not mix:
         kids_info = fetch_playlist_info(sp, settings["kids_playlist"])
@@ -285,7 +300,10 @@ async def start_playback(request: Request):
         )
 
     sp.start_playback(device_id=device_id or None, uris=mix)
-    return RedirectResponse("/?started=1", status_code=303)
+    return RedirectResponse(
+        f"/?started=1&kids_n={len(kids)}&adults_n={len(adults)}&mix_n={len(mix)}",
+        status_code=303,
+    )
 
 
 @app.post("/stop")
@@ -324,11 +342,22 @@ def dashboard(request: Request):
         for d in devices
     ) or "<option value=''>Geen apparaten gevonden — open Spotify in de Tesla</option>"
 
+    started_note = ""
+    if request.query_params.get("started") == "1":
+        kids_n = request.query_params.get("kids_n", "?")
+        adults_n = request.query_params.get("adults_n", "?")
+        mix_n = request.query_params.get("mix_n", "?")
+        started_note = (
+            f"<p style='color:#1DB954'>▶️ Gestart: {kids_n} kindernummers, {adults_n} volwassenennummers "
+            f"opgehaald, {mix_n} nummers in de afspeel-queue gezet.</p>"
+        )
+
     return HTMLResponse(f"""
     <html><head><title>Spotify Alternator</title></head>
     <body style="font-family:sans-serif;max-width:600px;margin:40px auto;">
       <h1>🎵 Spotify Playlist Alternator</h1>
       <p>Ingelogd als <b>{profile.get("display_name")}</b> — <a href="/logout">uitloggen</a></p>
+      {started_note}
 
       <h2>1. Playlists</h2>
       <form method="post" action="/settings">
