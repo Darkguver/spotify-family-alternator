@@ -157,8 +157,9 @@ def login(request: Request):
 
 @app.get("/callback")
 def callback(request: Request, code: str = "", error: str = ""):
-    if error:
-        return HTMLResponse(f"<p>Spotify login mislukt: {error}. <a href='/'>Terug</a></p>")
+    if error or not code:
+        reason = error or "geen autorisatiecode ontvangen"
+        return HTMLResponse(f"<p>Spotify login mislukt: {reason}. <a href='/login'>Opnieuw proberen</a></p>")
     sid = get_session_id(request)
     oauth = get_oauth(sid)
     oauth.get_access_token(code, as_dict=True)
