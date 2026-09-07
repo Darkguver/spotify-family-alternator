@@ -212,8 +212,22 @@ def debug(request: Request):
             elif my_id and owner_id and owner_id == my_id:
                 owner_match_note = " ✅ Deze playlist is van jouw eigen account."
         out.append(f"<p><b>{label} playlist meta ({pid}):</b> {meta.status_code} — {meta.text[:500]}{owner_match_note}</p>")
+
         tracks = _requests.get(f"https://api.spotify.com/v1/playlists/{pid}/tracks", headers=headers, params={"limit": 5})
-        out.append(f"<p><b>{label} playlist tracks:</b> {tracks.status_code} — {tracks.text[:500]}</p>")
+        out.append(f"<p><b>{label} /tracks (limit=5, geen fields):</b> {tracks.status_code} — {tracks.text[:400]} — retry-after: {tracks.headers.get('Retry-After')}</p>")
+
+        tracks_market = _requests.get(f"https://api.spotify.com/v1/playlists/{pid}/tracks", headers=headers, params={"limit": 5, "market": "from_token"})
+        out.append(f"<p><b>{label} /tracks (market=from_token):</b> {tracks_market.status_code} — {tracks_market.text[:400]}</p>")
+
+        items = _requests.get(f"https://api.spotify.com/v1/playlists/{pid}/items", headers=headers, params={"limit": 5})
+        out.append(f"<p><b>{label} /items (nieuwer endpoint):</b> {items.status_code} — {items.text[:400]}</p>")
+
+        tracks_fields = _requests.get(
+            f"https://api.spotify.com/v1/playlists/{pid}/tracks",
+            headers=headers,
+            params={"limit": 5, "fields": "items(track(uri,name))"},
+        )
+        out.append(f"<p><b>{label} /tracks (met fields):</b> {tracks_fields.status_code} — {tracks_fields.text[:400]}</p>")
 
     return HTMLResponse("<html><body style='font-family:sans-serif;max-width:800px;margin:40px auto;word-wrap:break-word;'>"
                          + "".join(out) + "<p><a href='/'>Terug</a></p></body></html>")
