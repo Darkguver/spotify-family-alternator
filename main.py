@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
-from spotipy import Spotify
+from spotipy import Spotify, SpotifyException
 from spotipy.oauth2 import SpotifyOAuth
 
 load_dotenv()
@@ -110,6 +110,22 @@ def extract_playlist_id(value: str) -> str:
     return value
 
 
+def fetch_playlist_info(sp: Spotify, playlist_id: str) -> dict:
+    """Haalt naam/eigenaar op, zodat we duidelijke foutmeldingen kunnen geven."""
+    if not playlist_id:
+        return {"name": None, "owner": None, "error": None}
+    try:
+        meta = sp.playlist(playlist_id, fields="name,owner.id,owner.display_name")
+        return {
+            "name": meta.get("name"),
+            "owner": (meta.get("owner") or {}).get("id"),
+            "owner_name": (meta.get("owner") or {}).get("display_name"),
+            "error": None,
+        }
+    except SpotifyException as e:
+        return {"name": None, "owner": None, "error": str(e)}
+
+
 def fetch_playlist_track_uris(sp: Spotify, playlist_id: str) -> list[str]:
     uris = []
     if not playlist_id:
@@ -198,8 +214,15 @@ async def start_playback(request: Request):
     device_id = str(form.get("device_id") or "")
     settings = load_settings()
 
-    kids = fetch_playlist_track_uris(sp, settings["kids_playlist"])
-    adults = fetch_playlist_track_uris(sp, settings["adults_playlist"])
+    try:
+        kids = fetch_playlist_track_uris(sp, settings["kids_playlist"])
+    except SpotifyException as e:
+        return HTMLResponse(f"<p>Kon de playlist voor kinderen niet ophalen: {e}. <a href='/'>Terug</a></p>")
+    try:
+        adults = fetch_playlist_track_uris(sp, settings["adults_playlist"])
+    except SpotifyException as e:
+        return HTMLResponse(f"<p>Kon de playlist voor volwassenen niet ophalen: {e}. <a href='/'>Terug</a></p>")
+
     if settings.get("shuffle", True):
         random.shuffle(kids)
         random.shuffle(adults)
@@ -208,7 +231,30 @@ async def start_playback(request: Request):
     mix = mix[:500]  # veiligheidslimiet
 
     if not mix:
-        return HTMLResponse("<p>Geen nummers gevonden, controleer de playlist-ids. <a href='/'>Terug</a></p>")
+        kids_info = fetch_playlist_info(sp, settings["kids_playlist"])
+        adults_info = fetch_playlist_info(sp, settings["adults_playlist"])
+
+        def describe(label: str, playlist_id: str, count: int, info: dict) -> str:
+            if not playlist_id:
+                return f"<li>{label}: geen playlist ingevuld.</li>"
+            if info.get("error"):
+                return f"<li>{label}: kon playlist niet vinden ({info['error']}). Controleer de link/ID.</li>"
+            owner_note = ""
+            if info.get("owner") == "spotify":
+                owner_note = (
+                    " ⚠️ Dit is een officiële Spotify-playlist (eigenaar: Spotify). "
+                    "Spotify staat sinds eind 2024 niet meer toe dat apps zoals deze de nummers "
+                    "van hun eigen redactionele/algoritmische playlists ophalen. "
+                    "Maak een kopie: open de playlist in Spotify, kies 'Dupliceren' "
+                    "(of maak een eigen playlist en sleep de nummers erin), en gebruik die eigen playlist hier."
+                )
+            return f"<li>{label}: '{info.get('name') or playlist_id}' — {count} nummers gevonden.{owner_note}</li>"
+
+        details = describe("Kinderen", settings["kids_playlist"], len(kids), kids_info)
+        details += describe("Volwassenen", settings["adults_playlist"], len(adults), adults_info)
+        return HTMLResponse(
+            f"<p>Geen nummers gevonden. Details:</p><ul>{details}</ul><p><a href='/'>Terug</a></p>"
+        )
 
     sp.start_playback(device_id=device_id or None, uris=mix)
     return RedirectResponse("/?started=1", status_code=303)
