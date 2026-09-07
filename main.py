@@ -39,6 +39,74 @@ SESSION_SECRET = os.environ.get("SESSION_SECRET", secrets.token_hex(16))
 app = FastAPI(title="Spotify Playlist Alternator")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
 
+# ---------------------------------------------------------------------------
+# Gedeelde, mobiel-vriendelijke styling (dark theme, grote touch-targets,
+# safe-area support voor iPhone notch/home-indicator).
+# ---------------------------------------------------------------------------
+MOBILE_CSS = """
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0;
+    background: #121212; color: #f2f2f2;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  body {
+    padding: env(safe-area-inset-top, 16px) env(safe-area-inset-right, 16px)
+             env(safe-area-inset-bottom, 24px) env(safe-area-inset-left, 16px);
+  }
+  .card {
+    max-width: 480px; margin: 0 auto;
+  }
+  h1 { font-size: 1.6em; margin: 8px 0 4px; }
+  h2 { font-size: 1.05em; margin: 24px 0 8px; color: #b3b3b3; }
+  a { color: #1DB954; }
+  p.muted { color: #b3b3b3; margin: 4px 0 16px; }
+  p.small { font-size: 0.85em; }
+  label {
+    display: block; margin: 14px 0 6px; font-size: 0.95em; color: #d9d9d9;
+  }
+  label.checkbox { display: flex; align-items: center; gap: 8px; }
+  label.checkbox input { width: auto; }
+  input[type="text"], input:not([type]), input[type="number"], select {
+    width: 100%; padding: 12px 14px; font-size: 16px;
+    border-radius: 10px; border: 1px solid #333; background: #1e1e1e; color: #f2f2f2;
+  }
+  input[type="checkbox"] {
+    width: 22px; height: 22px;
+  }
+  .row { display: flex; gap: 12px; }
+  .row-item { flex: 1; }
+  button, .btn {
+    display: block; width: 100%; text-align: center;
+    padding: 14px 20px; margin-top: 14px; font-size: 1.05em; font-weight: 600;
+    border-radius: 24px; border: none; text-decoration: none;
+    -webkit-appearance: none; appearance: none;
+  }
+  .btn-primary { background: #1DB954; color: #fff; }
+  .btn-secondary { background: #2a2a2a; color: #f2f2f2; }
+  .btn-outline { background: transparent; color: #f2f2f2; border: 1px solid #444; }
+  form { margin-bottom: 8px; }
+  select { -webkit-appearance: none; appearance: none; }
+</style>
+"""
+
+
+def page(body: str) -> str:
+    """Wikkelt losse HTML-snippets in dezelfde mobiel-vriendelijke pagina-shell."""
+    return f"""
+    <html>
+    <head>
+      <title>Spotify Alternator</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+      <meta name="apple-mobile-web-app-capable" content="yes">
+      <meta name="theme-color" content="#121212">
+      {MOBILE_CSS}
+    </head>
+    <body><div class="card">{body}</div></body></html>
+    """
+
 
 # ---------------------------------------------------------------------------
 # Instellingen (playlist-ids + afwissel-patroon) persistent in settings.json
@@ -191,7 +259,7 @@ def login(request: Request):
 def callback(request: Request, code: str = "", error: str = ""):
     if error or not code:
         reason = error or "geen autorisatiecode ontvangen"
-        return HTMLResponse(f"<p>Spotify login mislukt: {reason}. <a href='/login'>Opnieuw proberen</a></p>")
+        return HTMLResponse(page(f"<p>Spotify login mislukt: {reason}. <a href='/login'>Opnieuw proberen</a></p>"))
     sid = get_session_id(request)
     oauth = get_oauth(sid)
     oauth.get_access_token(code, as_dict=True)
@@ -255,11 +323,11 @@ async def start_playback(request: Request):
             details += f"<li>Kinderen: fout bij ophalen ({kids_error}).</li>"
         if adults_error:
             details += f"<li>Volwassenen: fout bij ophalen ({adults_error}).</li>"
-        return HTMLResponse(
+        return HTMLResponse(page(
             f"<p>Er ging iets mis bij het ophalen van (een van) de playlists:</p><ul>{details}</ul>"
             f"<p>Kinderen: {len(kids)} nummers gevonden, Volwassenen: {len(adults)} nummers gevonden.</p>"
             "<p><a href='/'>Terug</a></p>"
-        )
+        ))
 
     if not mix:
         kids_info = fetch_playlist_info(sp, settings["kids_playlist"])
@@ -295,9 +363,9 @@ async def start_playback(request: Request):
 
         details = describe("Kinderen", settings["kids_playlist"], len(kids), kids_info)
         details += describe("Volwassenen", settings["adults_playlist"], len(adults), adults_info)
-        return HTMLResponse(
+        return HTMLResponse(page(
             f"<p>Geen nummers gevonden. Details:</p><ul>{details}</ul><p><a href='/'>Terug</a></p>"
-        )
+        ))
 
     sp.start_playback(device_id=device_id or None, uris=mix)
     return RedirectResponse(
@@ -324,13 +392,21 @@ def dashboard(request: Request):
 
     if not sp:
         return HTMLResponse(f"""
-        <html><head><title>Spotify Alternator</title></head>
-        <body style="font-family:sans-serif;max-width:600px;margin:40px auto;">
-          <h1>🎵 Spotify Playlist Alternator</h1>
-          <p>Log eerst in met het Spotify-account dat ook in de Tesla is ingelogd.</p>
-          <a href="/login" style="background:#1DB954;color:white;padding:10px 20px;border-radius:20px;text-decoration:none;">
-            Inloggen met Spotify
-          </a>
+        <html>
+        <head>
+          <title>Spotify Alternator</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+          <meta name="apple-mobile-web-app-capable" content="yes">
+          <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+          <meta name="theme-color" content="#121212">
+          {MOBILE_CSS}
+        </head>
+        <body>
+          <div class="card">
+            <h1>🎵 Spotify Alternator</h1>
+            <p>Log eerst in met het Spotify-account dat ook in de Tesla is ingelogd.</p>
+            <a class="btn btn-primary" href="/login">Inloggen met Spotify</a>
+          </div>
         </body></html>
         """)
 
@@ -353,42 +429,52 @@ def dashboard(request: Request):
         )
 
     return HTMLResponse(f"""
-    <html><head><title>Spotify Alternator</title></head>
-    <body style="font-family:sans-serif;max-width:600px;margin:40px auto;">
-      <h1>🎵 Spotify Playlist Alternator</h1>
-      <p>Ingelogd als <b>{profile.get("display_name")}</b> — <a href="/logout">uitloggen</a></p>
-      {started_note}
+    <html>
+    <head>
+      <title>Spotify Alternator</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+      <meta name="apple-mobile-web-app-capable" content="yes">
+      <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+      <meta name="theme-color" content="#121212">
+      {MOBILE_CSS}
+    </head>
+    <body>
+      <div class="card">
+        <h1>🎵 Spotify Alternator</h1>
+        <p class="muted">Ingelogd als <b>{profile.get("display_name")}</b> — <a href="/logout">uitloggen</a></p>
+        {started_note}
 
-      <h2>1. Playlists</h2>
-      <form method="post" action="/settings">
-        <label>Playlist kinderen (link of ID)<br>
-          <input style="width:100%" name="kids_playlist" value="{settings['kids_playlist']}"></label><br><br>
-        <label>Playlist volwassenen (link of ID)<br>
-          <input style="width:100%" name="adults_playlist" value="{settings['adults_playlist']}"></label><br><br>
+        <h2>1. Playlists</h2>
+        <form method="post" action="/settings">
+          <label>Playlist kinderen (link of ID)
+            <input name="kids_playlist" value="{settings['kids_playlist']}"></label>
+          <label>Playlist volwassenen (link of ID)
+            <input name="adults_playlist" value="{settings['adults_playlist']}"></label>
 
-        <h2>2. Patroon (hoeveel nummers per beurt)</h2>
-        <label>Aantal nummers kinderen op rij:
-          <input type="number" min="0" name="kids_count" value="{settings['kids_count']}" style="width:60px"></label><br>
-        <label>Aantal nummers volwassenen op rij:
-          <input type="number" min="0" name="adults_count" value="{settings['adults_count']}" style="width:60px"></label><br>
-        <label><input type="checkbox" name="shuffle" {"checked" if settings.get("shuffle", True) else ""}>
-          Shuffle binnen elke playlist</label><br><br>
-        <button type="submit">Instellingen opslaan</button>
-      </form>
+          <h2>2. Patroon (hoeveel nummers per beurt)</h2>
+          <div class="row">
+            <label class="row-item">Kinderen op rij
+              <input type="number" min="0" inputmode="numeric" name="kids_count" value="{settings['kids_count']}"></label>
+            <label class="row-item">Volwassenen op rij
+              <input type="number" min="0" inputmode="numeric" name="adults_count" value="{settings['adults_count']}"></label>
+          </div>
+          <label class="checkbox"><input type="checkbox" name="shuffle" {"checked" if settings.get("shuffle", True) else ""}>
+            Shuffle binnen elke playlist</label>
+          <button type="submit" class="btn btn-secondary">Instellingen opslaan</button>
+        </form>
 
-      <h2>3. Afspelen</h2>
-      <form method="post" action="/start">
-        <label>Apparaat (kies de Tesla / auto)<br>
-          <select name="device_id" style="width:100%">{device_options}</select></label><br><br>
-        <button type="submit" style="background:#1DB954;color:white;padding:10px 20px;border-radius:20px;border:none;">
-          ▶️ Start om-en-om afspelen
-        </button>
-      </form>
-      <form method="post" action="/stop" style="margin-top:10px;">
-        <button type="submit">⏸️ Pauzeren</button>
-      </form>
+        <h2>3. Afspelen</h2>
+        <form method="post" action="/start">
+          <label>Apparaat (kies de Tesla / auto)
+            <select name="device_id">{device_options}</select></label>
+          <button type="submit" class="btn btn-primary">▶️ Start om-en-om afspelen</button>
+        </form>
+        <form method="post" action="/stop">
+          <button type="submit" class="btn btn-outline">⏸️ Pauzeren</button>
+        </form>
 
-      <p style="color:gray;font-size:0.9em;">Tip: open eerst de Spotify-app in de Tesla (of laat 'm actief spelen)
-      zodat hij hierboven in de apparatenlijst verschijnt.</p>
+        <p class="muted small">Tip: open eerst de Spotify-app in de Tesla (of laat 'm actief spelen)
+        zodat hij hierboven in de apparatenlijst verschijnt.</p>
+      </div>
     </body></html>
     """)
