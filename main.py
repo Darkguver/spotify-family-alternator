@@ -164,6 +164,39 @@ def interleave(kids: list[str], adults: list[str], kids_count: int, adults_count
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+@app.get("/debug")
+def debug(request: Request):
+    """Tijdelijke diagnosepagina om 403-fouten van Spotify te doorgronden."""
+    sid = get_session_id(request)
+    oauth = get_oauth(sid)
+    token_info = oauth.get_cached_token()
+    if not token_info:
+        return HTMLResponse("<p>Niet ingelogd. <a href='/login'>Log eerst in</a>.</p>")
+    if oauth.is_token_expired(token_info):
+        token_info = oauth.refresh_access_token(token_info["refresh_token"])
+
+    import requests as _requests
+    access_token = token_info["access_token"]
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    out = [f"<p><b>Scope van token:</b> {token_info.get('scope')}</p>"]
+
+    me = _requests.get("https://api.spotify.com/v1/me", headers=headers)
+    out.append(f"<p><b>/me:</b> {me.status_code} — {me.text[:500]}</p>")
+
+    settings = load_settings()
+    for label, pid in [("kids", settings.get("kids_playlist")), ("adults", settings.get("adults_playlist"))]:
+        if not pid:
+            continue
+        meta = _requests.get(f"https://api.spotify.com/v1/playlists/{pid}", headers=headers)
+        out.append(f"<p><b>{label} playlist meta ({pid}):</b> {meta.status_code} — {meta.text[:800]}</p>")
+        tracks = _requests.get(f"https://api.spotify.com/v1/playlists/{pid}/tracks", headers=headers, params={"limit": 5})
+        out.append(f"<p><b>{label} playlist tracks:</b> {tracks.status_code} — {tracks.text[:800]}</p>")
+
+    return HTMLResponse("<html><body style='font-family:sans-serif;max-width:800px;margin:40px auto;word-wrap:break-word;'>"
+                         + "".join(out) + "<p><a href='/'>Terug</a></p></body></html>")
+
+
 @app.get("/login")
 def login(request: Request):
     sid = get_session_id(request)
