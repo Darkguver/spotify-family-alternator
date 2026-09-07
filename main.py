@@ -14,6 +14,7 @@ import secrets
 import time
 from pathlib import Path
 
+import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -127,20 +128,36 @@ def fetch_playlist_info(sp: Spotify, playlist_id: str) -> dict:
 
 
 def fetch_playlist_track_uris(sp: Spotify, playlist_id: str) -> list[str]:
+    """Haalt track-URI's op via de nieuwere /items endpoint.
+
+    Spotify's legacy /playlists/{id}/tracks endpoint (gebruikt door
+    spotipy's playlist_items()) geeft sinds enkele weken een kale 403
+    Forbidden voor apps in Development Mode, zelfs voor eigen playlists.
+    De nieuwere /items endpoint werkt wel met dezelfde token/scopes, dus
+    die roepen we hier rechtstreeks aan.
+    """
     uris = []
     if not playlist_id:
         return uris
-    results = sp.playlist_items(
-        playlist_id,
-        fields="items.track.uri,items.track.is_local,next",
-        additional_types=["track"],
-    )
-    while results:
-        for item in results["items"]:
-            track = item.get("track")
-            if track and track.get("uri"):
-                uris.append(track["uri"])
-        results = sp.next(results) if results.get("next") else None
+    url = f"https://api.spotify.com/v1/playlists/{playlist_id}/items"
+    params = {
+        "limit": 100,
+        "offset": 0,
+        "fields": "items.item.uri,items.item.is_local,next",
+        "additional_types": "track",
+    }
+    headers = {"Authorization": f"Bearer {sp._auth}"}
+    while url:
+        resp = requests.get(url, headers=headers, params=params, timeout=15)
+        if resp.status_code != 200:
+            raise SpotifyException(resp.status_code, -1, f"{url} {resp.text}")
+        data = resp.json()
+        for entry in data.get("items", []):
+            item = entry.get("item")
+            if item and item.get("uri"):
+                uris.append(item["uri"])
+        url = data.get("next")
+        params = None
     return uris
 
 
@@ -163,76 +180,6 @@ def interleave(kids: list[str], adults: list[str], kids_count: int, adults_count
 
 # ---------------------------------------------------------------------------
 # Routes
-# ---------------------------------------------------------------------------
-@app.get("/debug")
-def debug(request: Request):
-    """Tijdelijke diagnosepagina om 403-fouten van Spotify te doorgronden."""
-    sid = get_session_id(request)
-    oauth = get_oauth(sid)
-    token_info = oauth.get_cached_token()
-    if not token_info:
-        return HTMLResponse("<p>Niet ingelogd. <a href='/login'>Log eerst in</a>.</p>")
-    if oauth.is_token_expired(token_info):
-        token_info = oauth.refresh_access_token(token_info["refresh_token"])
-
-    import requests as _requests
-    access_token = token_info["access_token"]
-    headers = {"Authorization": f"Bearer {access_token}"}
-
-    out = [f"<p><b>Scope van token:</b> {token_info.get('scope')}</p>"]
-
-    me_resp = _requests.get("https://api.spotify.com/v1/me", headers=headers)
-    me_json = me_resp.json() if me_resp.ok else {}
-    my_id = me_json.get("id")
-    out.append(f"<p><b>/me:</b> {me_resp.status_code} — ingelogd als '{me_json.get('display_name')}' (id: {my_id})</p>")
-
-    settings = load_settings()
-    for label, pid in [("kids", settings.get("kids_playlist")), ("adults", settings.get("adults_playlist"))]:
-        if not pid:
-            out.append(f"<p><b>{label} playlist:</b> niet ingevuld.</p>")
-            continue
-        meta = _requests.get(
-            f"https://api.spotify.com/v1/playlists/{pid}",
-            headers=headers,
-            params={"fields": "name,public,owner.id,owner.display_name"},
-        )
-        owner_id = None
-        owner_match_note = ""
-        if meta.ok:
-            meta_json = meta.json()
-            owner_id = (meta_json.get("owner") or {}).get("id")
-            if my_id and owner_id and owner_id != my_id:
-                owner_match_note = (
-                    " ⚠️ <b>Deze playlist is niet van jou</b> — eigenaar is "
-                    f"'{(meta_json.get('owner') or {}).get('display_name')}' (id: {owner_id}), "
-                    f"jij bent ingelogd als id {my_id}. Spotify's Development Mode blokkeert het "
-                    "ophalen van tracks uit playlists van andere accounts, zelfs als je editor bent. "
-                    "Dupliceer de playlist in de Spotify-app naar je eigen account en gebruik die link."
-                )
-            elif my_id and owner_id and owner_id == my_id:
-                owner_match_note = " ✅ Deze playlist is van jouw eigen account."
-        out.append(f"<p><b>{label} playlist meta ({pid}):</b> {meta.status_code} — {meta.text[:500]}{owner_match_note}</p>")
-
-        tracks = _requests.get(f"https://api.spotify.com/v1/playlists/{pid}/tracks", headers=headers, params={"limit": 5})
-        out.append(f"<p><b>{label} /tracks (limit=5, geen fields):</b> {tracks.status_code} — {tracks.text[:400]} — retry-after: {tracks.headers.get('Retry-After')}</p>")
-
-        tracks_market = _requests.get(f"https://api.spotify.com/v1/playlists/{pid}/tracks", headers=headers, params={"limit": 5, "market": "from_token"})
-        out.append(f"<p><b>{label} /tracks (market=from_token):</b> {tracks_market.status_code} — {tracks_market.text[:400]}</p>")
-
-        items = _requests.get(f"https://api.spotify.com/v1/playlists/{pid}/items", headers=headers, params={"limit": 5})
-        out.append(f"<p><b>{label} /items (nieuwer endpoint):</b> {items.status_code} — {items.text[:400]}</p>")
-
-        tracks_fields = _requests.get(
-            f"https://api.spotify.com/v1/playlists/{pid}/tracks",
-            headers=headers,
-            params={"limit": 5, "fields": "items(track(uri,name))"},
-        )
-        out.append(f"<p><b>{label} /tracks (met fields):</b> {tracks_fields.status_code} — {tracks_fields.text[:400]}</p>")
-
-    return HTMLResponse("<html><body style='font-family:sans-serif;max-width:800px;margin:40px auto;word-wrap:break-word;'>"
-                         + "".join(out) + "<p><a href='/'>Terug</a></p></body></html>")
-
-
 @app.get("/login")
 def login(request: Request):
     sid = get_session_id(request)
