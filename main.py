@@ -432,7 +432,19 @@ async def start_playback(request: Request):
             f"<p>Geen nummers gevonden. Details:</p><ul>{details}</ul><p><a href='/'>Terug</a></p>"
         ))
 
-    sp.start_playback(device_id=device_id or None, uris=mix)
+    # Spotify's eigen shuffle-modus op het afspeelapparaat zou onze
+    # zorgvuldig geïnterleavede volgorde weer door elkaar husselen, dus
+    # zetten we die expliciet uit. We proberen het zowel vóór als ná het
+    # starten van de afspeellijst: sommige apparaten accepteren de
+    # shuffle-aanroep pas zodra er een actieve afspeel-context is.
+    for _attempt in ("before", "after"):
+        if _attempt == "after":
+            sp.start_playback(device_id=device_id or None, uris=mix)
+        try:
+            sp.shuffle(False, device_id=device_id or None)
+        except Exception:
+            pass
+
     return RedirectResponse(
         f"/?started=1&mix_n={len(mix)}&playlists_n={len(selected)}",
         status_code=303,
@@ -606,6 +618,9 @@ def dashboard(request: Request):
 
         <p class="muted small">Tip: open eerst de Spotify-app in de Tesla (of laat 'm actief spelen)
         zodat hij hierboven in de apparatenlijst verschijnt.</p>
+        <p class="muted small">De app zet shuffle op het apparaat automatisch uit bij het starten
+        (anders wordt onze volgorde weer door elkaar gehusseld). Staat het shuffle-icoontje in
+        Spotify toch aan, tik 'm dan handmatig uit.</p>
       </div>
     </body></html>
     """)
