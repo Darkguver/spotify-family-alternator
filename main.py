@@ -12,6 +12,7 @@ import os
 import random
 import secrets
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
@@ -229,6 +230,37 @@ def can_fetch_playlist_items(sp: Spotify, playlist_id: str) -> bool:
     except requests.RequestException:
         return False
     return resp.status_code == 200
+
+
+# In-memory cache van accessibility-checks (playlist blijft toegankelijk of
+# ontoegankelijk totdat rechten wijzigen, dus we hoeven dit niet elke keer
+# opnieuw te testen bij het laden van het dashboard). Key: (sid, playlist_id).
+_ACCESS_CACHE: dict[tuple[str, str], tuple[float, bool]] = {}
+_ACCESS_CACHE_TTL = 6 * 3600  # seconden
+
+
+def check_playlists_accessible(sp: Spotify, sid: str, playlists: list[dict]) -> dict[str, bool]:
+    """Test in parallel welke van de gegeven playlists tracks opleveren,
+    met een cache zodat herhaalde dashboard-loads niet steeds opnieuw
+    N losse Spotify-verzoeken hoeven te doen."""
+    now = time.time()
+    results: dict[str, bool] = {}
+    to_check = []
+    for p in playlists:
+        pid = p["id"]
+        cached = _ACCESS_CACHE.get((sid, pid))
+        if cached and now - cached[0] < _ACCESS_CACHE_TTL:
+            results[pid] = cached[1]
+        else:
+            to_check.append(pid)
+
+    if to_check:
+        with ThreadPoolExecutor(max_workers=min(8, len(to_check))) as pool:
+            outcomes = pool.map(lambda pid: (pid, can_fetch_playlist_items(sp, pid)), to_check)
+        for pid, ok in outcomes:
+            results[pid] = ok
+            _ACCESS_CACHE[(sid, pid)] = (now, ok)
+    return results
 
 
 def fetch_playlist_track_uris(sp: Spotify, playlist_id: str) -> list[str]:
@@ -462,6 +494,7 @@ def dashboard(request: Request):
 
     selected_map = {p["id"]: p for p in settings.get("playlists", [])}
     playlists_error = ""
+    sid = get_session_id(request)
     try:
         my_id = sp.current_user().get("id")
     except SpotifyException:
@@ -474,20 +507,17 @@ def dashboard(request: Request):
 
     # Eigen playlists werken altijd. Playlists van anderen (bv. waar je editor/
     # collaborator op bent) blokkeert Spotify's Development Mode meestal, maar
-    # niet altijd — dus die testen we hier per stuk (kort verzoek van 1 nummer)
-    # en tonen we alleen als het écht lukt.
+    # niet altijd — dus die testen we per stuk (kort verzoek van 1 nummer),
+    # parallel en met een cache, zodat het dashboard snel blijft laden.
     owned = [p for p in all_playlists if p.get("owner_id") == my_id]
     not_owned = [p for p in all_playlists if p.get("owner_id") != my_id]
+    # Al geselecteerde playlists slaan we niet over voor de test: als de
+    # toegang inmiddels is ingetrokken willen we dat wél zien, maar de
+    # cache zorgt dat dit niet bij elke page load opnieuw een verzoek kost.
+    access = check_playlists_accessible(sp, sid, not_owned)
 
-    accessible_shared = []
-    inaccessible_count = 0
-    for p in not_owned:
-        # Al eerder geselecteerd én bekend als werkend? Niet opnieuw testen,
-        # anders vertraagt elke keer laden van de pagina bij veel playlists.
-        if p["id"] in selected_map or can_fetch_playlist_items(sp, p["id"]):
-            accessible_shared.append(p)
-        else:
-            inaccessible_count += 1
+    accessible_shared = [p for p in not_owned if access.get(p["id"])]
+    inaccessible_count = len(not_owned) - len(accessible_shared)
 
     my_playlists = owned + accessible_shared
 
