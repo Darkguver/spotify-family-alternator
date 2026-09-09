@@ -78,6 +78,14 @@ MOBILE_CSS = """
   }
   .row { display: flex; gap: 12px; }
   .row-item { flex: 1; }
+  .playlist-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 0; border-bottom: 1px solid #262626;
+  }
+  .playlist-label { flex: 1; margin: 0; display: flex; align-items: center; gap: 10px; }
+  .playlist-label input[type="checkbox"] { flex: 0 0 auto; }
+  .count-label { margin: 0; width: 84px; flex: 0 0 auto; font-size: 0.8em; }
+  .count-label input { padding: 8px 10px; }
   button, .btn {
     display: block; width: 100%; text-align: center;
     padding: 14px 20px; margin-top: 14px; font-size: 1.05em; font-weight: 600;
@@ -109,23 +117,36 @@ def page(body: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Instellingen (playlist-ids + afwissel-patroon) persistent in settings.json
+# Instellingen (geselecteerde playlists + aantal nummers per beurt) persistent
+# in settings.json
 # ---------------------------------------------------------------------------
 DEFAULT_SETTINGS = {
-    "kids_playlist": os.environ.get("KIDS_PLAYLIST_ID", ""),
-    "adults_playlist": os.environ.get("ADULTS_PLAYLIST_ID", ""),
-    "kids_count": 1,
-    "adults_count": 1,
+    "playlists": [],  # lijst van {"id": ..., "name": ..., "count": 1}
     "shuffle": True,
 }
 
 
 def load_settings() -> dict:
-    if SETTINGS_FILE.exists():
-        data = json.loads(SETTINGS_FILE.read_text())
-        merged = {**DEFAULT_SETTINGS, **data}
-        return merged
-    return dict(DEFAULT_SETTINGS)
+    data = json.loads(SETTINGS_FILE.read_text()) if SETTINGS_FILE.exists() else {}
+    settings = {**DEFAULT_SETTINGS, **data}
+    # Migratie vanaf de oude vaste kinderen/volwassenen-instelling, zodat
+    # bestaande configuraties niet verloren gaan.
+    if not settings.get("playlists") and (data.get("kids_playlist") or data.get("adults_playlist")):
+        migrated = []
+        if data.get("kids_playlist"):
+            migrated.append({
+                "id": data["kids_playlist"],
+                "name": "Kinderen (oude instelling)",
+                "count": data.get("kids_count", 1),
+            })
+        if data.get("adults_playlist"):
+            migrated.append({
+                "id": data["adults_playlist"],
+                "name": "Volwassenen (oude instelling)",
+                "count": data.get("adults_count", 1),
+            })
+        settings["playlists"] = migrated
+    return settings
 
 
 def save_settings(settings: dict) -> None:
@@ -168,31 +189,31 @@ def get_spotify(request: Request) -> Spotify | None:
 # ---------------------------------------------------------------------------
 # Playlist helpers
 # ---------------------------------------------------------------------------
-def extract_playlist_id(value: str) -> str:
-    """Accepteert een kale playlist-id, een spotify: URI of een open.spotify.com URL."""
-    value = value.strip()
-    if value.startswith("spotify:playlist:"):
-        return value.split(":")[-1]
-    if "open.spotify.com/playlist/" in value:
-        tail = value.split("open.spotify.com/playlist/")[-1]
-        return tail.split("?")[0].split("/")[0]
-    return value
-
-
-def fetch_playlist_info(sp: Spotify, playlist_id: str) -> dict:
-    """Haalt naam/eigenaar op, zodat we duidelijke foutmeldingen kunnen geven."""
-    if not playlist_id:
-        return {"name": None, "owner": None, "error": None}
-    try:
-        meta = sp.playlist(playlist_id, fields="name,owner.id,owner.display_name")
-        return {
-            "name": meta.get("name"),
-            "owner": (meta.get("owner") or {}).get("id"),
-            "owner_name": (meta.get("owner") or {}).get("display_name"),
-            "error": None,
-        }
-    except SpotifyException as e:
-        return {"name": None, "owner": None, "error": str(e)}
+def fetch_user_playlists(sp: Spotify) -> list[dict]:
+    """Haalt alle playlists op die in de bibliotheek van de ingelogde gebruiker
+    staan (eigen playlists + gevolgde playlists van anderen)."""
+    playlists = []
+    url = "https://api.spotify.com/v1/me/playlists"
+    params = {"limit": 50}
+    headers = {"Authorization": f"Bearer {sp._auth}"}
+    while url:
+        resp = requests.get(url, headers=headers, params=params, timeout=15)
+        if resp.status_code != 200:
+            raise SpotifyException(resp.status_code, -1, f"{url} {resp.text}")
+        data = resp.json()
+        for item in data.get("items", []):
+            if not item:
+                continue
+            owner = item.get("owner") or {}
+            playlists.append({
+                "id": item.get("id"),
+                "name": item.get("name") or "(zonder naam)",
+                "owner": owner.get("display_name") or owner.get("id") or "",
+                "tracks_total": (item.get("tracks") or {}).get("total"),
+            })
+        url = data.get("next")
+        params = None
+    return playlists
 
 
 def fetch_playlist_track_uris(sp: Spotify, playlist_id: str) -> list[str]:
@@ -229,20 +250,23 @@ def fetch_playlist_track_uris(sp: Spotify, playlist_id: str) -> list[str]:
     return uris
 
 
-def interleave(kids: list[str], adults: list[str], kids_count: int, adults_count: int) -> list[str]:
+def interleave_multi(track_lists: list[list[str]], counts: list[int]) -> list[str]:
+    """Rouleert om-en-om door een willekeurig aantal playlists, waarbij van
+    elke playlist steeds `count` nummers achter elkaar worden gepakt voordat
+    naar de volgende playlist wordt gegaan."""
     out = []
-    i, j = 0, 0
-    while i < len(kids) or j < len(adults):
-        for _ in range(max(kids_count, 0)):
-            if i < len(kids):
-                out.append(kids[i])
-                i += 1
-        for _ in range(max(adults_count, 0)):
-            if j < len(adults):
-                out.append(adults[j])
-                j += 1
-        if kids_count <= 0 and adults_count <= 0:
-            break
+    indices = [0] * len(track_lists)
+    progress = True
+    while progress:
+        progress = False
+        for idx, (tracks, count) in enumerate(zip(track_lists, counts)):
+            taken = 0
+            limit = max(count, 0)
+            while taken < limit and indices[idx] < len(tracks):
+                out.append(tracks[indices[idx]])
+                indices[idx] += 1
+                taken += 1
+                progress = True
     return out
 
 
@@ -280,10 +304,16 @@ def logout(request: Request):
 async def update_settings(request: Request):
     form = await request.form()
     settings = load_settings()
-    settings["kids_playlist"] = extract_playlist_id(str(form.get("kids_playlist", "")))
-    settings["adults_playlist"] = extract_playlist_id(str(form.get("adults_playlist", "")))
-    settings["kids_count"] = int(form.get("kids_count") or 1)
-    settings["adults_count"] = int(form.get("adults_count") or 1)
+    selected_ids = form.getlist("playlist_id")
+    playlists = []
+    for pid in selected_ids:
+        name = str(form.get(f"name_{pid}") or pid)
+        try:
+            count = int(form.get(f"count_{pid}") or 1)
+        except ValueError:
+            count = 1
+        playlists.append({"id": pid, "name": name, "count": count})
+    settings["playlists"] = playlists
     settings["shuffle"] = form.get("shuffle") == "on"
     save_settings(settings)
     return RedirectResponse("/", status_code=303)
@@ -297,79 +327,67 @@ async def start_playback(request: Request):
     form = await request.form()
     device_id = str(form.get("device_id") or "")
     settings = load_settings()
+    selected = settings.get("playlists", [])
 
-    kids_error = adults_error = None
+    if not selected:
+        return HTMLResponse(page(
+            "<p>Er zijn nog geen playlists geselecteerd. Ga terug, vink minstens één "
+            "playlist aan en sla de instellingen op.</p><p><a href='/'>Terug</a></p>"
+        ))
+
     try:
-        kids = fetch_playlist_track_uris(sp, settings["kids_playlist"])
-    except Exception as e:
-        kids = []
-        kids_error = str(e)
+        my_id = sp.current_user().get("id")
+    except SpotifyException:
+        my_id = None
     try:
-        adults = fetch_playlist_track_uris(sp, settings["adults_playlist"])
-    except Exception as e:
-        adults = []
-        adults_error = str(e)
+        owned_by = {p["id"]: p.get("owner") for p in fetch_user_playlists(sp)}
+    except Exception:
+        owned_by = {}
 
-    if settings.get("shuffle", True):
-        random.shuffle(kids)
-        random.shuffle(adults)
+    track_lists, counts, names, errors = [], [], [], []
+    for entry in selected:
+        pid = entry.get("id")
+        name = entry.get("name") or pid
+        count = entry.get("count", 1)
+        try:
+            uris = fetch_playlist_track_uris(sp, pid)
+        except Exception as e:
+            uris = []
+            note = ""
+            if owned_by.get(pid) and my_id and owned_by[pid] != my_id:
+                note = (
+                    " ⚠️ Deze playlist is niet van jouw eigen account. Spotify's Development Mode "
+                    "blokkeert soms het ophalen van tracks uit playlists van andere accounts. "
+                    "Dupliceer de playlist naar je eigen account ('···' → Dupliceren) en selecteer die kopie."
+                )
+            errors.append(f"{name}: fout bij ophalen ({e}).{note}")
+        if settings.get("shuffle", True):
+            random.shuffle(uris)
+        track_lists.append(uris)
+        counts.append(count)
+        names.append(name)
 
-    mix = interleave(kids, adults, settings["kids_count"], settings["adults_count"])
-    mix = mix[:500]  # veiligheidslimiet
-
-    if kids_error or adults_error:
-        details = ""
-        if kids_error:
-            details += f"<li>Kinderen: fout bij ophalen ({kids_error}).</li>"
-        if adults_error:
-            details += f"<li>Volwassenen: fout bij ophalen ({adults_error}).</li>"
+    if errors:
+        details = "".join(f"<li>{e}</li>" for e in errors)
         return HTMLResponse(page(
             f"<p>Er ging iets mis bij het ophalen van (een van) de playlists:</p><ul>{details}</ul>"
-            f"<p>Kinderen: {len(kids)} nummers gevonden, Volwassenen: {len(adults)} nummers gevonden.</p>"
             "<p><a href='/'>Terug</a></p>"
         ))
 
+    mix = interleave_multi(track_lists, counts)
+    mix = mix[:500]  # veiligheidslimiet
+
     if not mix:
-        kids_info = fetch_playlist_info(sp, settings["kids_playlist"])
-        adults_info = fetch_playlist_info(sp, settings["adults_playlist"])
-        try:
-            my_id = sp.current_user().get("id")
-        except SpotifyException:
-            my_id = None
-
-        def describe(label: str, playlist_id: str, count: int, info: dict) -> str:
-            if not playlist_id:
-                return f"<li>{label}: geen playlist ingevuld.</li>"
-            if info.get("error"):
-                return f"<li>{label}: kon playlist niet vinden ({info['error']}). Controleer de link/ID.</li>"
-            owner_note = ""
-            if info.get("owner") == "spotify":
-                owner_note = (
-                    " ⚠️ Dit is een officiële Spotify-playlist (eigenaar: Spotify). "
-                    "Spotify staat sinds eind 2024 niet meer toe dat apps zoals deze de nummers "
-                    "van hun eigen redactionele/algoritmische playlists ophalen. "
-                    "Maak een kopie: open de playlist in Spotify, kies 'Dupliceren' "
-                    "(of maak een eigen playlist en sleep de nummers erin), en gebruik die eigen playlist hier."
-                )
-            elif info.get("owner") and my_id and info.get("owner") != my_id:
-                owner_note = (
-                    f" ⚠️ Deze playlist is niet van jouw eigen account (eigenaar: "
-                    f"'{info.get('owner_name') or info.get('owner')}'). Spotify's Development Mode "
-                    "blokkeert het ophalen van tracks uit playlists van andere accounts, ook als je "
-                    "editor/collaborator bent. Dupliceer de playlist in de Spotify-app naar je eigen "
-                    "account ('···' → Dupliceren) en gebruik daarna de link van die eigen kopie."
-                )
-            return f"<li>{label}: '{info.get('name') or playlist_id}' — {count} nummers gevonden.{owner_note}</li>"
-
-        details = describe("Kinderen", settings["kids_playlist"], len(kids), kids_info)
-        details += describe("Volwassenen", settings["adults_playlist"], len(adults), adults_info)
+        details = "".join(
+            f"<li>{n}: 0 nummers gevonden.</li>" for n in names
+        )
         return HTMLResponse(page(
             f"<p>Geen nummers gevonden. Details:</p><ul>{details}</ul><p><a href='/'>Terug</a></p>"
         ))
 
     sp.start_playback(device_id=device_id or None, uris=mix)
     return RedirectResponse(
-        f"/?started=1&kids_n={len(kids)}&adults_n={len(adults)}&mix_n={len(mix)}",
+        f"/?started=1&mix_n={len(mix)}&playlists_n={len(selected)}",
         status_code=303,
     )
 
@@ -420,13 +438,51 @@ def dashboard(request: Request):
 
     started_note = ""
     if request.query_params.get("started") == "1":
-        kids_n = request.query_params.get("kids_n", "?")
-        adults_n = request.query_params.get("adults_n", "?")
         mix_n = request.query_params.get("mix_n", "?")
+        playlists_n = request.query_params.get("playlists_n", "?")
         started_note = (
-            f"<p style='color:#1DB954'>▶️ Gestart: {kids_n} kindernummers, {adults_n} volwassenennummers "
-            f"opgehaald, {mix_n} nummers in de afspeel-queue gezet.</p>"
+            f"<p style='color:#1DB954'>▶️ Gestart: {playlists_n} playlists geroteerd, "
+            f"{mix_n} nummers in de afspeel-queue gezet.</p>"
         )
+
+    selected_map = {p["id"]: p for p in settings.get("playlists", [])}
+    playlists_error = ""
+    try:
+        my_playlists = fetch_user_playlists(sp)
+    except Exception as e:
+        my_playlists = []
+        playlists_error = f"<p class='muted'>⚠️ Kon je playlists niet ophalen: {e}</p>"
+
+    rows = ""
+    for p in my_playlists:
+        pid = p["id"]
+        checked = "checked" if pid in selected_map else ""
+        count_val = selected_map.get(pid, {}).get("count", 1)
+        subtitle_bits = [b for b in [p.get("owner"), (f"{p['tracks_total']} nummers" if p.get("tracks_total") is not None else None)] if b]
+        subtitle = " · ".join(subtitle_bits)
+        rows += f"""
+        <div class="playlist-row">
+          <label class="checkbox playlist-label">
+            <input type="checkbox" name="playlist_id" value="{pid}" {checked}>
+            <span><b>{p['name']}</b><br><span class="muted small">{subtitle}</span></span>
+          </label>
+          <input type="hidden" name="name_{pid}" value="{p['name']}">
+          <label class="row-item count-label">Nummers op rij
+            <input type="number" min="0" inputmode="numeric" name="count_{pid}" value="{count_val}"></label>
+        </div>
+        """
+
+    missing = [sp_pl for sp_pl in settings.get("playlists", []) if sp_pl["id"] not in {p["id"] for p in my_playlists}]
+    missing_note = ""
+    if missing:
+        missing_names = ", ".join(m["name"] for m in missing)
+        missing_note = (
+            f"<p class='muted small'>⚠️ Eerder geselecteerd maar niet meer gevonden in je bibliotheek: "
+            f"{missing_names}. Ze doen niet meer mee totdat je ze opnieuw selecteert.</p>"
+        )
+
+    if not my_playlists:
+        rows = "<p class='muted'>Geen playlists gevonden in je Spotify-bibliotheek.</p>"
 
     return HTMLResponse(f"""
     <html>
@@ -444,26 +500,20 @@ def dashboard(request: Request):
         <p class="muted">Ingelogd als <b>{profile.get("display_name")}</b> — <a href="/logout">uitloggen</a></p>
         {started_note}
 
-        <h2>1. Playlists</h2>
+        <h2>1. Kies je playlists</h2>
+        <p class="muted small">Vink de playlists aan die mee moeten draaien in de rotatie (bv. jouw playlist,
+        die van je vrouw, en die van je dochter) en geef aan hoeveel nummers er per beurt achter elkaar
+        van die playlist gespeeld worden.</p>
+        {playlists_error}
+        {missing_note}
         <form method="post" action="/settings">
-          <label>Playlist kinderen (link of ID)
-            <input name="kids_playlist" value="{settings['kids_playlist']}"></label>
-          <label>Playlist volwassenen (link of ID)
-            <input name="adults_playlist" value="{settings['adults_playlist']}"></label>
-
-          <h2>2. Patroon (hoeveel nummers per beurt)</h2>
-          <div class="row">
-            <label class="row-item">Kinderen op rij
-              <input type="number" min="0" inputmode="numeric" name="kids_count" value="{settings['kids_count']}"></label>
-            <label class="row-item">Volwassenen op rij
-              <input type="number" min="0" inputmode="numeric" name="adults_count" value="{settings['adults_count']}"></label>
-          </div>
+          {rows}
           <label class="checkbox"><input type="checkbox" name="shuffle" {"checked" if settings.get("shuffle", True) else ""}>
             Shuffle binnen elke playlist</label>
           <button type="submit" class="btn btn-secondary">Instellingen opslaan</button>
         </form>
 
-        <h2>3. Afspelen</h2>
+        <h2>2. Afspelen</h2>
         <form method="post" action="/start">
           <label>Apparaat (kies de Tesla / auto)
             <select name="device_id">{device_options}</select></label>

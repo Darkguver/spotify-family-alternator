@@ -30,8 +30,8 @@ cp .env.example .env
 uvicorn main:app --reload
 ```
 
-Open http://127.0.0.1:8000, log in met Spotify, vul de twee playlists en het
-patroon in, kies je auto als apparaat en klik **Start**.
+Open http://127.0.0.1:8000, log in met Spotify, vink de playlists aan die
+mee moeten rouleren, kies je auto als apparaat en klik **Start**.
 
 ## 3. Deployen naar Render (gratis)
 
@@ -49,16 +49,19 @@ patroon in, kies je auto als apparaat en klik **Start**.
 6. Deploy. Open de Render-URL, log in en start het afwisselend afspelen —
    werkt dan overal, ook onderweg.
 
-## Playlists invullen
+## Playlists selecteren
 
-Je kan een Spotify-link plakken zoals
-`https://open.spotify.com/playlist/37i9dQZF1DXxxxx` — de app haalt zelf de
-playlist-id eruit.
+Na inloggen haalt de app automatisch alle playlists uit je Spotify-bibliotheek
+op en toont ze als een aanvinklijst. Vink de playlists aan die mee moeten
+rouleren (bv. je eigen playlist, die van je partner, en die van je kind) en
+vul per playlist in hoeveel nummers er achter elkaar gespeeld worden voordat
+er naar de volgende playlist wordt gewisseld.
 
 ## Hoe het werkt
 
-De app haalt alle nummers van beide playlists op, shuffelt ze (optioneel) en
-weeft ze in elkaar volgens jullie patroon (bv. 1 kind / 1 volwassene). Die
-volledige afspeellijst wordt in één keer naar Spotify Connect gestuurd zodat
-het apparaat (de Tesla) 'm gewoon achter elkaar afspeelt — geen constante
-verbinding met de server nodig tijdens het rijden.
+De app haalt alle nummers van elke geselecteerde playlist op, shuffelt ze
+(optioneel) en weeft ze om-en-om in elkaar volgens het ingestelde aantal
+nummers per playlist. Die volledige afspeellijst wordt in één keer naar
+Spotify Connect gestuurd zodat het apparaat (de Tesla) 'm gewoon achter
+elkaar afspeelt — geen constante verbinding met de server nodig tijdens het
+rijden.
