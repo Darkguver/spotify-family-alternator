@@ -209,6 +209,7 @@ def fetch_user_playlists(sp: Spotify) -> list[dict]:
                 "id": item.get("id"),
                 "name": item.get("name") or "(zonder naam)",
                 "owner": owner.get("display_name") or owner.get("id") or "",
+                "owner_id": owner.get("id"),
                 "tracks_total": (item.get("tracks") or {}).get("total"),
             })
         url = data.get("next")
@@ -448,10 +449,20 @@ def dashboard(request: Request):
     selected_map = {p["id"]: p for p in settings.get("playlists", [])}
     playlists_error = ""
     try:
-        my_playlists = fetch_user_playlists(sp)
+        my_id = sp.current_user().get("id")
+    except SpotifyException:
+        my_id = None
+    try:
+        all_playlists = fetch_user_playlists(sp)
     except Exception as e:
-        my_playlists = []
+        all_playlists = []
         playlists_error = f"<p class='muted'>⚠️ Kon je playlists niet ophalen: {e}</p>"
+
+    # Alleen playlists van het eigen account tonen: Spotify's Development Mode
+    # blokkeert het ophalen van tracks uit playlists van andere accounts, dus
+    # playlists van anderen zouden hier toch altijd een 403 geven.
+    my_playlists = [p for p in all_playlists if p.get("owner_id") == my_id]
+    others_count = len(all_playlists) - len(my_playlists)
 
     rows = ""
     for p in my_playlists:
@@ -477,12 +488,20 @@ def dashboard(request: Request):
     if missing:
         missing_names = ", ".join(m["name"] for m in missing)
         missing_note = (
-            f"<p class='muted small'>⚠️ Eerder geselecteerd maar niet meer gevonden in je bibliotheek: "
+            f"<p class='muted small'>⚠️ Eerder geselecteerd maar niet meer bruikbaar: "
             f"{missing_names}. Ze doen niet meer mee totdat je ze opnieuw selecteert.</p>"
         )
 
+    others_note = ""
+    if others_count:
+        others_note = (
+            f"<p class='muted small'>{others_count} playlist(s) van andere accounts in je bibliotheek zijn "
+            "verborgen — Spotify staat het ophalen van tracks daaruit niet toe. Dupliceer zo'n playlist naar "
+            "je eigen account ('···' → Dupliceren) om 'm hier te kunnen gebruiken.</p>"
+        )
+
     if not my_playlists:
-        rows = "<p class='muted'>Geen playlists gevonden in je Spotify-bibliotheek.</p>"
+        rows = "<p class='muted'>Geen eigen playlists gevonden in je Spotify-bibliotheek.</p>"
 
     return HTMLResponse(f"""
     <html>
@@ -506,6 +525,7 @@ def dashboard(request: Request):
         van die playlist gespeeld worden.</p>
         {playlists_error}
         {missing_note}
+        {others_note}
         <form method="post" action="/settings">
           {rows}
           <label class="checkbox"><input type="checkbox" name="shuffle" {"checked" if settings.get("shuffle", True) else ""}>
