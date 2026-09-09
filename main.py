@@ -217,6 +217,20 @@ def fetch_user_playlists(sp: Spotify) -> list[dict]:
     return playlists
 
 
+def can_fetch_playlist_items(sp: Spotify, playlist_id: str) -> bool:
+    """Lichte test (limit=1) of we tracks uit deze playlist mogen ophalen.
+    Gebruikt om playlists van anderen (bv. als collaborator/editor) te
+    filteren op daadwerkelijke toegang, in plaats van te gokken op eigenaarschap."""
+    url = f"https://api.spotify.com/v1/playlists/{playlist_id}/items"
+    params = {"limit": 1, "fields": "items.item.uri"}
+    headers = {"Authorization": f"Bearer {sp._auth}"}
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=15)
+    except requests.RequestException:
+        return False
+    return resp.status_code == 200
+
+
 def fetch_playlist_track_uris(sp: Spotify, playlist_id: str) -> list[str]:
     """Haalt track-URI's op via de nieuwere /items endpoint.
 
@@ -458,18 +472,35 @@ def dashboard(request: Request):
         all_playlists = []
         playlists_error = f"<p class='muted'>⚠️ Kon je playlists niet ophalen: {e}</p>"
 
-    # Alleen playlists van het eigen account tonen: Spotify's Development Mode
-    # blokkeert het ophalen van tracks uit playlists van andere accounts, dus
-    # playlists van anderen zouden hier toch altijd een 403 geven.
-    my_playlists = [p for p in all_playlists if p.get("owner_id") == my_id]
-    others_count = len(all_playlists) - len(my_playlists)
+    # Eigen playlists werken altijd. Playlists van anderen (bv. waar je editor/
+    # collaborator op bent) blokkeert Spotify's Development Mode meestal, maar
+    # niet altijd — dus die testen we hier per stuk (kort verzoek van 1 nummer)
+    # en tonen we alleen als het écht lukt.
+    owned = [p for p in all_playlists if p.get("owner_id") == my_id]
+    not_owned = [p for p in all_playlists if p.get("owner_id") != my_id]
+
+    accessible_shared = []
+    inaccessible_count = 0
+    for p in not_owned:
+        # Al eerder geselecteerd én bekend als werkend? Niet opnieuw testen,
+        # anders vertraagt elke keer laden van de pagina bij veel playlists.
+        if p["id"] in selected_map or can_fetch_playlist_items(sp, p["id"]):
+            accessible_shared.append(p)
+        else:
+            inaccessible_count += 1
+
+    my_playlists = owned + accessible_shared
 
     rows = ""
     for p in my_playlists:
         pid = p["id"]
         checked = "checked" if pid in selected_map else ""
         count_val = selected_map.get(pid, {}).get("count", 1)
-        subtitle_bits = [b for b in [p.get("owner"), (f"{p['tracks_total']} nummers" if p.get("tracks_total") is not None else None)] if b]
+        is_shared = p.get("owner_id") != my_id
+        subtitle_bits = [b for b in [
+            (f"editor bij {p.get('owner')}" if is_shared else None) or p.get("owner"),
+            (f"{p['tracks_total']} nummers" if p.get("tracks_total") is not None else None),
+        ] if b]
         subtitle = " · ".join(subtitle_bits)
         rows += f"""
         <div class="playlist-row">
@@ -493,15 +524,15 @@ def dashboard(request: Request):
         )
 
     others_note = ""
-    if others_count:
+    if inaccessible_count:
         others_note = (
-            f"<p class='muted small'>{others_count} playlist(s) van andere accounts in je bibliotheek zijn "
-            "verborgen — Spotify staat het ophalen van tracks daaruit niet toe. Dupliceer zo'n playlist naar "
-            "je eigen account ('···' → Dupliceren) om 'm hier te kunnen gebruiken.</p>"
+            f"<p class='muted small'>{inaccessible_count} playlist(s) van andere accounts zijn verborgen — "
+            "Spotify staat het ophalen van tracks daaruit niet toe voor deze app, ook niet als je editor bent. "
+            "Dupliceer zo'n playlist naar je eigen account ('···' → Dupliceren) om 'm hier te kunnen gebruiken.</p>"
         )
 
     if not my_playlists:
-        rows = "<p class='muted'>Geen eigen playlists gevonden in je Spotify-bibliotheek.</p>"
+        rows = "<p class='muted'>Geen bruikbare playlists gevonden in je Spotify-bibliotheek.</p>"
 
     return HTMLResponse(f"""
     <html>
